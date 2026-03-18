@@ -129,11 +129,10 @@ class JamoBPE:
         return symbols
 
     def encode(self, text):
-
         if self.jamo_break:
             text = self.h2hcj(text)
-        tokens = []
 
+        tokens = []
         for word in text.split():
             tokens.extend(self.encode_word(word))
 
@@ -145,7 +144,7 @@ class JamoBPE:
             if self.jamo_break:
                 text = self.hcj2h(text)
             return text
-        
+
         return text
 
     def save(self, output_dir, preprocessed_texts):
@@ -162,7 +161,23 @@ class JamoBPE:
             encoding="utf-8"
         )
 
+        # Convert tuples to lists for JSON compatibility
+        serializable_merges = [list(pair) for pair in self.merges]
         (output_dir / "merges.json").write_text(
-            json.dumps(self.merges, ensure_ascii=False, indent=2),
+            json.dumps(serializable_merges, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
+
+    def load(self, output_dir):
+        output_dir = Path(output_dir)
+
+        vocab_path = output_dir / "vocab.json"
+        merges_path = output_dir / "merges.json"
+
+        if not vocab_path.exists() or not merges_path.exists():
+            raise FileNotFoundError(f"Missing tokenizer files in: {output_dir}")
+
+        self.vocab = json.loads(vocab_path.read_text(encoding="utf-8"))
+
+        loaded_merges = json.loads(merges_path.read_text(encoding="utf-8"))
+        self.merges = [tuple(pair) for pair in loaded_merges]
