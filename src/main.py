@@ -1,33 +1,55 @@
 from tokenizer.jamo_bpe import JamoBPE
 from pathlib import Path
+import tkinter as tk
 
-PROJECT_DIR = Path(__file__).parents[1]
+from app import JamoBPEApp
 
-INPUT_DIR = PROJECT_DIR / "datas" / "train"
-OUTPUT_DIR = PROJECT_DIR / "dicts"
 
-tokenizer = JamoBPE()
-full_tokenizer = JamoBPE(jamo_break=False)
+def main():
+    PROJECT_DIR = Path(__file__).parents[1]
 
-raw_texts = tokenizer.read_txt_files(INPUT_DIR)
-preprocessed_texts = tokenizer.preprocess(raw_texts)
+    INPUT_DIR = PROJECT_DIR / "datas" / "train"
+    OUTPUT_DIR = PROJECT_DIR / "dicts"
 
-tokenizer.train(
-    preprocessed_texts,
-    vocab_size=2000,
-    min_frequency=2,
-)
-full_tokenizer.train(
-    preprocessed_texts,
-    vocab_size=2000,
-    min_frequency=2,
-)
+    # -----------------------------
+    # Tokenizers
+    # -----------------------------
+    tokenizer = JamoBPE()
+    full_tokenizer = JamoBPE(jamo_break=False)
 
-tokenizer.save(OUTPUT_DIR/"jamo", preprocessed_texts)
-full_tokenizer.save(OUTPUT_DIR/"full", preprocessed_texts)
+    # -----------------------------
+    # Training (your original logic)
+    # -----------------------------
+    raw_texts = tokenizer.read_txt_files(INPUT_DIR)
+    preprocessed_texts = tokenizer.preprocess(raw_texts)
 
-tokens = tokenizer.encode("안녕하세요 여러분")
-full_tokens = full_tokenizer.encode("안녕하세요 여러분")
+    tokenizer.train(
+        preprocessed_texts,
+        vocab_size=2000,
+        min_frequency=2,
+    )
+    full_tokenizer.train(
+        preprocessed_texts,
+        vocab_size=2000,
+        min_frequency=2,
+    )
 
-print("Tokens:", tokens)
-print("Full Tokens:", full_tokens)
+    tokenizer.save(OUTPUT_DIR / "jamo", preprocessed_texts)
+    full_tokenizer.save(OUTPUT_DIR / "full", preprocessed_texts)
+
+    # -----------------------------
+    # GUI
+    # -----------------------------
+    root = tk.Tk()
+
+    app = JamoBPEApp(
+        root=root,
+        tokenizer=tokenizer,
+        full_tokenizer=full_tokenizer
+    )
+
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
