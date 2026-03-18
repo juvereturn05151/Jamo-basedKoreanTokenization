@@ -51,7 +51,7 @@ class JamoBPEApp:
         output_frame.rowconfigure(0, weight=1)
 
         # Left panel: Tokens
-        tokens_frame = ttk.LabelFrame(output_frame, text="Tokens", padding=8)
+        tokens_frame = ttk.LabelFrame(output_frame, text="Jamo-based Tokens", padding=8)
         tokens_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
 
         self.tokens_output = tk.Text(
