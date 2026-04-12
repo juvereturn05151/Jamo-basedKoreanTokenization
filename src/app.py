@@ -95,8 +95,14 @@ class JamoBPEApp:
             tokens = self.tokenizer.encode(text)
             full_tokens = self.full_tokenizer.encode(text)
 
-            self._set_output(self.tokens_output, f"Tokens:\n{tokens}")
-            self._set_output(self.full_tokens_output, f"Full Tokens:\n{full_tokens}")
+            self._set_output(
+                self.tokens_output,
+                self._format_tokens_output("Tokens", tokens),
+            )
+            self._set_output(
+                self.full_tokens_output,
+                self._format_tokens_output("Full Tokens", full_tokens),
+            )
             self.status_label.config(text="Tokenization complete")
         except Exception as e:
             self.status_label.config(text=f"Tokenization failed: {e}")
@@ -115,12 +121,12 @@ class JamoBPEApp:
 
             self.tokenizer.train(
                 preprocessed_texts,
-                vocab_size=2000,
+                vocab_size=32768,
                 min_frequency=2,
             )
             self.full_tokenizer.train(
                 preprocessed_texts,
-                vocab_size=2000,
+                vocab_size=32768,
                 min_frequency=2,
             )
 
@@ -148,3 +154,7 @@ class JamoBPEApp:
     def _set_output(widget, content):
         widget.delete("1.0", "end")
         widget.insert("1.0", content)
+
+    @staticmethod
+    def _format_tokens_output(title, tokens):
+        return f"{title} ({len(tokens)}):\n{tokens}"

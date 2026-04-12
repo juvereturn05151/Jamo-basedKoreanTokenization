@@ -5,7 +5,7 @@ from tokenizer.jamo_bpe import JamoBPE
 from app import JamoBPEApp
 
 
-def ensure_tokenizer(tokenizer, output_dir, input_dir, vocab_size=2000, min_frequency=2):
+def ensure_tokenizer(tokenizer, output_dir, input_dir, vocab_size=32768, min_frequency=2):
     vocab_path = output_dir / "vocab.json"
     merges_path = output_dir / "merges.json"
 
