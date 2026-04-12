@@ -4,6 +4,8 @@ import json
 
 from kss import Kss
 
+from .config import DEFAULT_VOCAB_SIZE, DEFAULT_MIN_FREQUENCY
+
 EOW = "</w>"
 
 
@@ -79,7 +81,7 @@ class JamoBPE:
             vocab.update(symbols)
         return sorted(vocab)
 
-    def train(self, texts, vocab_size=2000, min_frequency=2):
+    def train(self, texts, vocab_size=DEFAULT_VOCAB_SIZE, min_frequency=DEFAULT_MIN_FREQUENCY):
         word_freqs = self.build_word_freqs(texts)
         self.merges = []
 

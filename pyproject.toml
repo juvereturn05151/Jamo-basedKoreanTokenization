@@ -5,6 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "datasets>=4.8.4",
     "kss>=6.0.6",
     "requests>=2.32.5",
+    "streamlit>=1.56.0",
+    "tokenizer>=3.6.2",
+    "tokenizers>=0.22.2",
 ]
