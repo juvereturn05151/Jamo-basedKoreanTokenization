@@ -1,10 +1,13 @@
 from pathlib import Path
 
 import streamlit as st
+import torch
+from tokenizers import Tokenizer
 
 from tokenizer.jamo_bpe import JamoBPE
 from tokenizer.hf_jamo_bpe import HFJamoBPE
 from tokenizer.config import DEFAULT_VOCAB_SIZE, DEFAULT_MIN_FREQUENCY
+from translation.model import Seq2SeqTransformer
 
 
 BACKEND_DIRS = {
@@ -75,6 +78,64 @@ def load_tokenizers():
     return tokenizers, input_dir, output_dir
 
 
+TRANSLATOR_CKPTS = {
+    "hf_jamo": "jamo_based.pt",
+    "hf_full": "character_based.pt",
+}
+
+
+@st.cache_resource
+def load_translator(kind: str):
+    project_dir = Path(__file__).resolve().parents[1]
+    ckpt_path = project_dir / "models" / TRANSLATOR_CKPTS[kind]
+    if not ckpt_path.exists():
+        return None
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    cfg = ckpt["config"]
+
+    kr_tok = HFJamoBPE(jamo_break=(kind == "hf_jamo"))
+    kr_tok.load(project_dir / "dicts" / kind)
+    kr_tok.ensure_special_tokens(tokens=("<pad>", "<unk>"))
+
+    en_tok = Tokenizer.from_pretrained("gpt2")
+    en_tok.add_special_tokens(["<pad>", "<bos>", "<eos>"])
+
+    model = Seq2SeqTransformer(
+        src_vocab=cfg["src_vocab"],
+        tgt_vocab=cfg["tgt_vocab"],
+        src_pad_id=cfg["src_pad_id"],
+        tgt_pad_id=cfg["tgt_pad_id"],
+        d_model=cfg["d_model"],
+        nhead=cfg["nhead"],
+        num_encoder_layers=cfg["num_encoder_layers"],
+        num_decoder_layers=cfg["num_decoder_layers"],
+        dim_feedforward=cfg["dim_feedforward"],
+        dropout=cfg["dropout"],
+        max_len=cfg["max_len"] + 4,
+    ).to(device)
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+    return model, kr_tok, en_tok, cfg, device
+
+
+def run_translation(kind: str, text: str, max_len: int = 128) -> str | None:
+    loaded = load_translator(kind)
+    if loaded is None:
+        return None
+    model, kr_tok, en_tok, cfg, device = loaded
+
+    src_ids = kr_tok.encode_ids(text)[:max_len] or [cfg["src_pad_id"]]
+    src = torch.tensor([src_ids], dtype=torch.long, device=device)
+    src_pm = src == cfg["src_pad_id"]
+    ys = model.greedy_decode(src, src_pm, cfg["bos_id"], cfg["eos_id"], max_len=max_len)
+    ids = ys[0].tolist()[1:]
+    if cfg["eos_id"] in ids:
+        ids = ids[: ids.index(cfg["eos_id"])]
+    return en_tok.decode(ids)
+
+
 def retrain_all(tokenizers, input_dir, output_dir):
     sample = next(iter(tokenizers.values()))
     raw_texts = sample.read_txt_files(input_dir)
@@ -105,11 +166,11 @@ def main():
 
     col1, col2 = st.columns(2)
     with col1:
-        backend = st.radio(
-            "Backend",
+        dataset = st.radio(
+            "Dataset",
             ["local", "hf"],
             horizontal=True,
-            format_func=lambda v: {"local": "Local", "hf": "HuggingFace"}[v],
+            format_func=lambda v: {"local": "Small", "hf": "Large"}[v],
         )
     with col2:
         mode = st.radio(
@@ -134,12 +195,24 @@ def main():
             st.warning("No input provided.")
         else:
             try:
-                tokens = tokenizers[(backend, mode)].encode(text.strip())
-                label = f"{backend.capitalize()} / {mode.capitalize()}"
+                tokens = tokenizers[(dataset, mode)].encode(text.strip())
+                label = f"{dataset.capitalize()} / {mode.capitalize()}"
                 st.subheader(f"Tokens — {label} ({len(tokens)})")
                 st.code(str(tokens), language="python")
             except Exception as e:
                 st.error(f"Tokenization failed: {e}")
+
+            if dataset == "hf":
+                kind = "hf_jamo" if mode == "jamo" else "hf_full"
+                st.subheader(f"Translation — {mode.capitalize()}")
+                try:
+                    hyp = run_translation(kind, text.strip())
+                    if hyp is None:
+                        st.write(f"No checkpoint at models/{TRANSLATOR_CKPTS[kind]}")
+                    else:
+                        st.write(hyp)
+                except Exception as e:
+                    st.write(f"Translation failed: {e}")
 
 
 main()

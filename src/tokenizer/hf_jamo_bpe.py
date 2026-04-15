@@ -64,6 +64,22 @@ class HFJamoBPE:
         encoding = self._tokenizer.encode(text)
         return encoding.tokens
 
+    def encode_ids(self, text):
+        assert self._tokenizer is not None, "tokenizer not loaded"
+        if self.jamo_break:
+            text = self.h2hcj(text)
+        return self._tokenizer.encode(text).ids
+
+    def ensure_special_tokens(self, tokens=("<pad>", "<unk>", "<bos>", "<eos>")):
+        assert self._tokenizer is not None, "tokenizer not loaded"
+        self._tokenizer.add_special_tokens(list(tokens))
+        self.vocab = self._tokenizer.get_vocab()
+        return {t: self._tokenizer.token_to_id(t) for t in tokens}
+
+    def vocab_size(self):
+        assert self._tokenizer is not None, "tokenizer not loaded"
+        return self._tokenizer.get_vocab_size()
+
     def decode(self, tokens, to_hangul=False):
         text = "".join(tokens).replace(EOW, " ").strip()
         if to_hangul and self.jamo_break:
