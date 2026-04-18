@@ -1,0 +1,844 @@
+\documentclass[sigconf,nonacm]{acmart}
+
+%% ACM 메타데이터 간소화
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+%% 한글 지원 (XeLaTeX + kotex 권장)
+\usepackage{kotex}
+
+%% 기타 패키지
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+%% 긴 식별자/경로가 좁은 2-column에서 margin을 벗어나는 문제 방지.
+%% url 패키지(hyperref 내부)로 타이프라이터 스타일의 breakable 명령 \code 정의.
+\makeatletter
+\g@addto@macro\UrlBreaks{\do\_\do\.\do\/\do\-\do\(\do\)\do\,\do\=\do\"}
+\makeatother
+\DeclareUrlCommand\code{\urlstyle{tt}}
+
+%% 전반적으로 줄바꿈을 느슨하게
+\sloppy
+
+\begin{document}
+
+\title{Jamo-based Korean Tokenization: \\
+A BPE Approach for Sub-character Level Subword Units}
+
+\author{Minjae Kyung}
+\affiliation{%
+  \institution{Digipen Institute of Technology}
+  \country{USA}
+}
+\email{minjae.kyung@digipen.com}
+
+\author{Ju-ve Chankasemporn}
+\affiliation{%
+  \institution{Digipen Institute of Technology}
+  \country{USA}
+}
+\email{juve.chankasemporn@digipen.edu}
+
+
+\begin{abstract}
+현대 자연어 처리에서 토크나이저는 모델 학습과 추론 성능에 직접적인 영향을 미치는 핵심 구성 요소이다.
+그러나 대부분의 다국어 토크나이저는 문자(character)를 최소 단위로 가정하고 Byte Pair Encoding (BPE)을 적용하기 때문에,
+Hangul과 같이 문자 자체가 자음과 모음의 결합으로 구성되는 표기 체계에서는
+형태소 경계가 음절 내부에 존재하여도 이를 포착하지 못하는 구조적 한계가 있다.
+본 연구에서는 Hangul 음절을 초성(initial), 중성(medial), 종성(final)의 Jamo 단위로 분해한 뒤
+BPE를 적용하는 Jamo 기반 토크나이저를 제안한다. 자체 구현한 Python BPE와
+Hugging Face \texttt{tokenizers}~\cite{huggingface_tokenizers} 기반 BPE의 두 버전을 32k 및 16k vocab
+크기로 학습하였으며, 동일 구조의 Transformer~\cite{vaswani2017attention} 기반 한영 번역기를 두 토크나이저로
+각각 학습시켜 토크나이저가 학습에 미치는 영향을 분석하였다. CC-100 한국어 코퍼스~\cite{conneau2020cc100}에 대한
+토큰화 통계 실험 결과, Jamo 기반 토크나이저는 동일한 vocab 크기에서 문자 기반 대비 평균 토큰 수가 더 적었으며,
+특히 도메인 한정 소규모 코퍼스(소설 데이터)로 학습한 경우와 작은 vocab 크기에서 그 격차가 확대되었다. 또한 ``노랫말''과 같이 형태소 경계가
+음절 내부에 위치하는 사례에서 Jamo 기반 분절이 의미 단위와 일치하는 결과를 보였다.
+\end{abstract}
+
+\keywords{Korean Tokenization, Jamo, Byte Pair Encoding, Subword Tokenization, Neural Machine Translation, Hangul}
+
+\maketitle
+
+\section{Introduction}
+\label{sec:intro}
+
+자연어 처리(NLP) 모델의 성능은 입력 텍스트를 얼마나 효과적으로 토큰 단위로 분절하는가에 크게 의존한다.
+현대의 대규모 언어 모델과 기계 번역 시스템은 대부분 Byte Pair Encoding (BPE)~\cite{sennrich2016bpe},
+WordPiece~\cite{wu2016google}, SentencePiece~\cite{kudo2018sentencepiece}와 같은 서브워드 기반
+토크나이저를 사용한다. 이러한 토크나이저는 공통적으로 \emph{문자(character)} 또는 \emph{바이트(byte)}를
+최소 단위로 가정하고, 자주 함께 등장하는 인접 기호 쌍을 반복적으로 병합하여 서브워드 어휘를 구성한다.
+
+그러나 이러한 가정은 모든 언어에 보편적으로 적용되지 않는다. 한국어의 표기 체계인
+Hangul은 자음(초성, 종성)과 모음(중성)이 결합하여 하나의 음절 블록을 이루는 특수한 구조를 갖는다.
+예를 들어 ``먹다''의 ``먹''은 시각적으로는 단일 문자이지만 실제로는 $\langle$ㅁ, ㅓ, ㄱ$\rangle$의
+세 Jamo로 구성되며, 형태소나 음운 현상의 경계가 음절 \emph{내부}에 존재하는 경우가 드물지 않다.
+문자 단위에서만 토큰을 병합하면 Hangul 음절을 최소 원자로 취급하게 되어, 이처럼 음절 내부에 걸친
+의미 경계를 표현할 수 없다.
+
+이러한 한계는 실무적으로도 이미 관측되고 있다. GPT 계열의 tiktoken과 같은 다국어 토크나이저에서는
+한국어 한 문장이 같은 뜻의 영어 문장보다 수 배 많은 토큰을 차지하는 경우가 흔하며, 이는 API
+호출 비용, 문맥 길이 활용률, 추론 지연(latency) 등 다운스트림 효용에 직접적인 손실을 야기한다.
+Hangul의 미세 구조(fine-grained structure)를 활용하면 이 손실을 부분적으로나마 보전할 수 있으리라
+기대된다.
+
+본 연구는 이러한 문제를 해결하기 위해 다음의 기여를 제시한다:
+\begin{itemize}
+    \item Hangul 음절을 결정론적 공식을 통해 Jamo 단위로 분해한 뒤 BPE를 적용하는
+    Jamo 기반 토크나이저를 구현하였다. 디코딩 시에는 Jamo 시퀀스를 다시 음절로 재조합한다.
+    \item 교육적 목적의 \textbf{자체 Python 구현}과 대규모 학습용 \textbf{Hugging Face \texttt{tokenizers}
+    기반 구현}의 두 가지 버전을 제공하였으며, vocab 크기 32k와 16k의 두 설정으로 각각 학습하였다.
+    \item 동일 구조의 Transformer 기반 한영 번역기를 Jamo 기반 / 문자 기반 토크나이저로 각각 학습시켜,
+    토크나이저 선택이 실제 학습 곡선(loss curve)에 미치는 영향을 직접 비교하였다.
+    \item CC-100 한국어 코퍼스의 한 청크(약 5,000개 문장)에 대해 평균/중앙값/표준편차/최솟값/최댓값 등
+    토큰 길이 분포 통계를 측정하여, tiktoken \texttt{o200k\_base}~\cite{tiktoken}을 포함한 기존
+    토크나이저들과 정량 비교하였다.
+    \item 사용자가 입력 문장의 분절과 번역 결과를 실시간으로 체험할 수 있는 Streamlit 기반 데모를 구축하였다.
+\end{itemize}
+
+본 논문의 구성은 다음과 같다. 2장에서는 Hangul의 구조와 BPE 알고리즘에 대한 배경지식을 정리하고,
+3장에서는 관련 연구를 개관한다. 4장에서 연구 동기를 상세히 서술한 뒤, 5장에서 제안 방법과 구현
+세부사항을, 6장에서 실험 설정을 기술한다. 7장에서 정량/정성 결과를 제시하고, 8장 논의,
+9장 한계, 10장 향후 연구에 이어 11장에서 결론을 맺는다.
+
+\section{Background}
+\label{sec:background}
+
+\subsection{Hangul and Jamo}
+
+Hangul은 초성(initial consonant), 중성(medial vowel), 선택적 종성(final consonant)의 세 요소가 결합하여
+하나의 음절 블록(syllable block)을 형성하는 문자 체계이다. 유니코드에서 현대 Hangul 음절은
+\texttt{U+AC00}(가)부터 \texttt{U+D7A3}(힣)까지 총 $19 \times 21 \times 28 = 11{,}172$자로
+정의되며, 각 음절 $S$는 다음의 공식을 통해 구성 Jamo로 분해될 수 있다:
+\[
+S = ((C_{\text{init}} \times 21) + C_{\text{med}}) \times 28 + C_{\text{fin}} + \text{0xAC00}
+\]
+여기서 $C_{\text{init}} \in [0, 19)$, $C_{\text{med}} \in [0, 21)$, $C_{\text{fin}} \in [0, 28)$은
+각각 19개의 초성, 21개의 중성, 28개의 종성(``없음''을 포함) 인덱스이다.
+이러한 체계적 규칙 덕분에 한국어는 외부 형태소 분석기 없이도 순수하게 문자열 연산만으로
+Jamo 수준까지 결정론적 분해 및 재조합이 가능하다.
+
+본 연구의 구현에서는 Kss~\cite{kss} 라이브러리가 제공하는 \texttt{h2hcj} (Hangul-to-Hangul
+Compatibility Jamo) 및 \texttt{hcj2h} 변환을 이용한다. \texttt{h2hcj}는 음절을 호환 자모
+(compatibility Jamo, \texttt{U+3131--U+318E}) 시퀀스로 분해하며, \texttt{hcj2h}는 그 역변환을
+수행한다. 호환 자모를 사용하는 이유는 초성/종성이 동일한 글리프를 공유하도록 하여
+어휘 크기의 낭비를 줄이기 위함이다. 예를 들어 음절 ``강''은 표준 Hangul Jamo 블록
+(\texttt{U+1100--U+11FF})에서는 초성 \texttt{U+1100}, 중성 \texttt{U+1161}, 종성 \texttt{U+11BC}의
+세 서로 다른 코드포인트로 분해되어 동일한 ``ㄱ''/``ㅇ'' 계열 자모라도 위치에 따라 별개의 심볼로
+취급되지만, 호환 자모(\texttt{U+3131--U+318E})에서는 ㄱ (\texttt{U+3131}), ㅏ (\texttt{U+314F}),
+ㅇ (\texttt{U+3147})으로 표현되어 위치에 무관하게 동일한 기저 심볼로 통합된다. BPE의 관점에서 이는 merge 통계가 위치 정보에 분산되지 않고 통합된
+자모 단위에서 축적됨을 뜻하며, 결과적으로 merge 품질과 vocab 활용 효율을 높인다.
+
+Hangul은 1443년 세종대왕에 의해 창제된 이래 음소(phoneme) 단위를 시각적 블록으로 응집한
+음소문자(featural alphabet)로 설계되었다. 이러한 설계는 전산 처리 관점에서
+매우 우호적인 특성을 지니는데, (i) 모든 현대 음절이 완전한 조합형 블록으로 정의되어 분해/재조합이
+결정론적이고 무손실이며, (ii) 초성/중성/종성의 집합이 작아 vocab 예산 소비가 적으며,
+(iii) 고어나 방언 처리를 제외하면 예외 케이스가 거의 없다는 점이다. 본 연구는 이러한
+구조적 이점을 적극 활용한다.
+
+\subsection{Byte Pair Encoding}
+
+BPE~\cite{sennrich2016bpe}는 원래 Gage(1994)가 제안한 데이터 압축 기법이었으나,
+Sennrich 등에 의해 서브워드 토큰화 분야에 도입되면서 현대 NLP의 사실상 표준 기법 중 하나로
+자리잡았다. 알고리즘은 다음과 같이 요약된다.
+\begin{enumerate}
+    \item 각 단어를 최소 단위(일반적으로 문자) 시퀀스로 분해하고, 단어 끝을 표시하기 위한 특수
+    심볼 (예: \texttt{</w>})을 부착한다.
+    \item 전 코퍼스에서 가장 빈번한 인접 심볼 쌍을 선택하고, 해당 쌍을 하나의 새로운 심볼로 병합한다.
+    \item 원하는 vocab 크기에 도달하거나 최소 빈도 임계값을 만족하는 쌍이 없을 때까지 이를 반복한다.
+\end{enumerate}
+BPE는 학습 데이터로부터 통계적으로 빈출되는 서브워드를 자연스럽게 포착하기 때문에,
+희귀어(rare word) 처리와 사전 크기 제어 측면에서 큰 장점을 지닌다. 기존 연구들은 대부분
+문자 혹은 바이트 수준에서 출발하며, Jamo 수준에서 BPE를 적용하는 접근은 비교적 덜 탐구되어 왔다.
+
+BPE의 변형으로는 (i) 모든 유효한 분절 후보에 대해 unigram 언어모델을 이용해 log-likelihood를
+최대화하는 유닛을 유지하는 Unigram LM~\cite{kudo2018sp}, (ii) 여러 분절 후보를 확률적으로
+sampling하여 정규화 효과를 얻는 BPE-dropout~\cite{provilkov2020bpedropout},
+(iii) 바이트 수준에서 출발해 Unicode 정규화에 대한 강건성을 확보하는 byte-level BPE
+(GPT-2 이후의 표준)~\cite{radford2019gpt2} 등이 있다. 본 연구는 이러한 변형과 직교하는 축인
+\emph{기저 단위}의 선택에 초점을 맞춘다. 즉, 문자/바이트가 아닌 ``자모''라는 더 미세한 기저 단위
+위에서 BPE를 수행하는 것의 효과를 측정한다.
+
+\subsection{Pre-tokenization}
+
+BPE는 일반적으로 공백, 문장부호, CJK 범위 등을 기준으로 문자열을 사전에 분리하는 pre-tokenization
+단계를 거친다. 본 연구의 HF 구현은 \code{pre_tokenizers.Whitespace()}를 채택하여,
+공백과 일반적인 구두점을 경계로 삼는 전통적인 방식을 사용한다. Jamo 모드에서는 Jamo 분해가
+pre-tokenization \emph{이전}에 적용되므로, BPE 학습은 공백으로 분리된 Jamo 시퀀스에 대해
+진행된다. 이 단계적 구성은 한 음절이 여러 단어에 걸쳐 병합되는 것을 구조적으로 방지한다.
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Subword Tokenization}
+
+신경 기계 번역과 대규모 언어 모델의 부상 이후 서브워드 토큰화는 사실상 표준 전처리 기법으로
+자리 잡았다. Sennrich \emph{et~al.}~\cite{sennrich2016bpe}은 BPE를 최초로 NMT에 적용하여
+희귀 어휘와 열린 어휘(open-vocabulary) 문제를 해결할 수 있음을 보였다.
+Wu \emph{et~al.}~\cite{wu2016google}은 WordPiece 토크나이저를 Google NMT 시스템에서 제안하여
+가능도(likelihood)에 기반한 서브워드 선택을 도입하였고, Kudo \emph{et~al.}~\cite{kudo2018sentencepiece}은
+언어 독립적이고 학습 가능한 SentencePiece 및 unigram LM 기반 토크나이저를 공개하였다.
+이러한 접근들은 공통적으로 문자 혹은 바이트를 최소 단위로 가정한다.
+
+\subsection{Korean Tokenization}
+
+한국어 토큰화는 주로 두 방향으로 연구되어 왔다.
+첫째는 \textbf{형태소 기반 접근}으로, MeCab-ko~\cite{mecabko}, Komoran, Mecab, Okt 등의 형태소 분석기를
+이용해 어절을 형태소로 분해한 뒤 서브워드 토큰화를 수행한다. 이는 의미 경계에 정렬된 분절을
+제공하지만, 분석기 의존성과 OOV(out-of-vocabulary) 문제를 안는다.
+둘째는 \textbf{자모 기반 접근}으로, 일부 연구에서는 Hangul 음절을 초성/중성/종성으로 분해한 뒤
+RNN이나 Transformer에 직접 투입하여 문자 수준 모델링의 일반화 성능을 측정한 바 있다.
+KR-BERT~\cite{krbert}, KoCharELECTRA~\cite{kocharelectra} 등은 서브워드 vocab 구성 단계에서 Hangul의
+구조적 특성을 부분적으로 반영하였으며, Park \emph{et~al.}~\cite{park2020jamo}은 Jamo 단위
+word2vec 임베딩이 형태소 단위 임베딩 대비 유사 태스크에서 경쟁력 있는 성능을 보임을 보고하였다.
+본 연구는 이러한 계보 위에서 특히 ``Jamo 기저 + BPE merge'' 조합의 토큰화 효율과 학습 영향을
+정량적으로 비교한다는 점에 초점을 맞춘다.
+
+\subsection{Tokenizer Evaluation}
+
+토크나이저 평가에서는 전통적으로 \emph{fertility}(원문 단어 대비 토큰 수 비율)와 평균 토큰 길이,
+그리고 downstream task 성능이 주로 사용된다~\cite{rust2021multilingualtok}. 최근에는
+tokenizer가 LLM의 학습 효율과 다국어 성능에 미치는 영향이 재조명되면서, 언어별 fertility 격차가
+다국어 모델의 ``tax''로 작용한다는 점이 여러 차례 지적되었다. 본 연구에서 보고하는
+``tiktoken이 한국어에서 비효율적''이라는 결과는 이러한 맥락과 일치한다.
+
+\section{Motivation}
+\label{sec:motivation}
+
+한국어에서는 어간과 어미, 형태소의 경계가 종종 음절 \emph{내부}에 위치한다. 두 단어가 결합하면서
+발생하는 사잇소리 현상이나, 활용형에서 나타나는 종성 변화가 대표적인 예이다. 문자 단위
+토크나이저는 음절을 원자로 취급하므로 이러한 내부 경계를 표현할 수 없다.
+그림~\ref{fig:meaning_split}에서와 같이, 의미 단위로 정확히 분절하려면 하나의 문자 블록을
+내부에서 쪼개야 하는 상황이 발생한다. 이것이 본 연구에서 Jamo 수준에서 토큰화를 수행하고자 한
+핵심 동기이다.
+
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.9\columnwidth}{%
+\centering
+단어: \textbf{노랫말} (가사, lyrics)\\[2pt]
+의미 분절: 노래 + ㅅ(사잇소리, interfix) + 말\\[2pt]
+문자 단위 분절은 ``노랫''에서 종성 ``ㅅ''을 분리할 수 없음\\[2pt]
+Jamo 단위 분절: ㄴㅗㄹㅐ / ㅅ / ㅁㅏㄹ
+}}
+\caption{문자 내부에서의 의미 경계 예시. Hangul 음절 ``랫''은 ``래''(노래의 일부)와 사잇소리 ``ㅅ''이
+결합한 결과이며, Jamo 수준에서만 그 경계를 드러낼 수 있다.}
+\label{fig:meaning_split}
+\end{figure}
+
+또한 vocab 효율 측면에서도 Jamo 수준 접근은 이점이 있다. 문자 기반 토크나이저는 학습 코퍼스에
+등장하는 11,172개 가능한 Hangul 음절을 모두 개별 원자로 취급해야 하지만, Jamo 기반 접근은
+67개(19+21+28$-$1, 종성 ``없음'' 제외)의 Jamo만 기저 단위로 두고 나머지 어휘 용량을
+빈출 서브워드 병합에 할당할 수 있다. 이는 특히 vocab 크기가 작을 때 한국어 표현력에 유리하게 작용한다.
+
+세 번째로, \emph{희귀 음절(rare syllable)}에 대한 강건성이 개선된다. 문자 기반 토크나이저가 학습 중
+관찰하지 못한 음절은 거의 항상 UNK로 처리되거나, 바이트 fallback을 가진 byte-level 토크나이저의
+경우 UTF-8 바이트 시퀀스(보통 3바이트)로 파편화된다. 반면 Jamo 기반에서는 해당 음절이
+학습 코퍼스에서 관찰되지 않았더라도 그 음절을 구성하는 자모 자체는 코퍼스 전체에서 충분히
+빈번하게 등장하므로, 분해된 자모 시퀀스 수준에서 안정적으로 표현된다. 이는 특히 고유명사,
+외래어 표기, 고어 등에 대한 분절 품질에 긍정적으로 작용한다.
+
+마지막으로, 공학적 관점에서 Jamo 분해는 \emph{결정론적}이고 \emph{가역적}이다. 외부 형태소 분석기나
+사전에 의존하지 않으므로 구현이 단순하고, 배포 환경에 추가 의존성을 가져올 필요가 없다.
+모든 현대 Hangul 음절에 대해 분해와 재조합이 $O(1)$ 연산이며, 순방향/역방향 변환이
+완전 일대일(bijective)이므로 번역 결과를 다시 한국어로 렌더링할 때 정보 손실이 없다.
+
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Data}
+
+\textbf{토크나이저 학습 데이터.} Hugging Face에 공개된 CC-100 한국어 처리
+데이터셋(\code{CocoRoF/cc-100-korean-processing})을 사용하였다. 이 데이터셋은 23개의 청크(chunk)로
+분할되어 있으며, 대규모 학습 버전(HF 기반)에서는 처음 두 청크(\code{chunk_00}, \code{chunk_01})를
+iterator로 순차 주입하여 학습하였다. 소규모 학습 버전(자체 Python 구현)은 공모전 기반 소설 데이터
+및 텍스트 파일을 사용하는 경량 구성이다.
+
+\textbf{번역 모델 학습 데이터.} 한국어-영어 병렬 코퍼스는 AI Hub 유형의 ``Tech'' 및 ``Life'' 도메인
+\code{ko_en_train_set.json} / \code{ko_en_valid_set.json} 파일에서 추출한
+$\langle$ko, en$\rangle$ 쌍을 합쳐 사용하였다.
+전처리 단계에서 한국어/영어 중 어느 한 쪽의 길이가 2자 미만인 짝은 제거하였다.
+
+\textbf{전처리.} Jamo 모드(\code{jamo_break=True})에서는 Kss \code{h2hcj}로 한글 음절을
+호환 Jamo 시퀀스로 변환한 뒤 BPE 학습/추론에 투입한다. 디코딩 시에는 \code{hcj2h}로
+역변환하여 원래의 음절로 복원한다. 문자 모드(\code{jamo_break=False})에서는 별도의 변환 없이
+원본 텍스트를 그대로 사용한다.
+
+\textbf{데이터 파이프라인.} Hugging Face \code{datasets.load_dataset}은 \code{datas/huggingface/}
+캐시에 요청된 청크를 사전 다운로드한 뒤 로드한다. 각 청크는 평균 수십만\textasciitilde수백만 줄의
+웹 크롤링 기반 한국어 텍스트로 구성된다. 본 연구는 전체 23개 청크 중 토크나이저 학습용으로 처음 두
+청크(\code{chunk_00}, \code{chunk_01})만 사용하므로 전체 데이터셋을 한 번에 보유할 필요는 없다.
+평가용 통계는 학습에 사용되지 않은 \code{chunk_05}에서 5,000개 샘플을 추출하여 측정함으로써
+training--evaluation 독립성을 확보하였다.
+
+\subsection{Jamo-based BPE Tokenizer}
+
+본 연구에서는 두 가지 구현의 Jamo 기반 토크나이저를 제공한다.
+
+\textbf{(1) 자체 Python 구현 (\code{JamoBPE}).} 교육적 목적과 알고리즘 이해를 위해 순수 Python으로
+BPE를 직접 구현하였다. 알고리즘은 다음의 단계를 따른다:
+\begin{enumerate}
+    \item 전 코퍼스를 공백 기준으로 토큰화하고, 각 단어를 문자(또는 Jamo) 시퀀스에 \code{</w>}
+    (end-of-word) 접미사를 붙인 튜플로 변환한 뒤 빈도를 집계한다 (\code{build_word_freqs}).
+    \item 모든 단어에 대해 인접 심볼 쌍의 빈도를 집계한다 (\code{get_pair_stats}).
+    \item 최빈 쌍을 병합하여 새로운 심볼을 생성하고 (\code{merge_pair_in_word}),
+    코퍼스를 갱신한다 (\code{merge_corpus}).
+    \item vocab 크기가 목표치에 도달하거나 최빈 쌍의 빈도가 \code{min_frequency}($=2$) 미만이면 종료한다.
+\end{enumerate}
+학습 결과는 \code{vocab.json}과 \code{merges.json}으로 직렬화되며, 인코딩 시에는 저장된 merge
+순서를 그대로 적용한다. vocab 크기는 기본 32,768로 설정하였다. 단, 소규모 코퍼스 특성상
+\code{min_frequency=2}의 종료 조건(\code{jamo_bpe.py} 98행)이 \code{vocab_size} 목표보다 먼저
+만족되어, 실제 수렴된 어휘 크기는 약 8{,}904로 형성되었다.
+
+\textbf{(2) Hugging Face 구현 (\code{HFJamoBPE}).} 대규모 데이터로의 확장을 위해 Rust로 구현된
+Hugging Face \code{tokenizers} 라이브러리를 래핑하였다. 핵심 설정은 다음과 같다:
+\begin{itemize}
+    \item \code{model = models.BPE(end_of_word_suffix="</w>")}
+    \item \code{pre_tokenizer = pre_tokenizers.Whitespace()}
+    \item \code{trainer = trainers.BpeTrainer(vocab_size, min_frequency, special_tokens=[], end_of_word_suffix="</w>")}
+    \item BPE 학습 자체에는 특수 토큰을 등록하지 않는다(\code{special_tokens=[]}). 학습 완료 후
+    \code{ensure_special_tokens()}로 post-hoc 추가하며, 번역 학습 경로에서는 한국어 측에
+    \code{<pad>}, \code{<unk>}만, 영어 GPT-2 측에 \code{<pad>}, \code{<bos>}, \code{<eos>}만
+    각각 부여한다. \code{<bos>}/\code{<eos>}는 타겟 생성에만 필요하므로 소스 측에는 불필요하다.
+\end{itemize}
+본 구현은 vocab 크기 32,768 및 16,384의 두 설정으로 학습하여, vocab 크기 축소가
+Jamo/문자 기반 분절 효율 차이에 미치는 영향을 관찰할 수 있도록 하였다.
+
+두 구현 모두 입력 텍스트에 대해 먼저 Hangul 음절을 구성 Jamo로 분해하는 전처리를 수행한 뒤,
+해당 Jamo 시퀀스 위에서 BPE 학습 및 토큰화를 진행한다. 디코딩 시에는 토큰을 이어붙이고
+\code{</w>}를 공백으로 치환한 뒤 Jamo를 재조합한다.
+
+\textbf{구현 간 차이.} 두 구현은 동일한 알고리즘적 아이디어를 공유하지만 다음의 공학적 차이를 갖는다.
+(i) 자체 Python 구현은 단일 스레드 CPython에서 실행되므로 수백만 문장 규모의 학습에는 부적합하다.
+따라서 Python 구현은 공모전 기반 소설 텍스트(수 MB 규모)로 학습하고, 개념 증명(proof-of-concept)과
+알고리즘 투명성 확보의 역할만 담당한다.
+(ii) HF 구현은 Rust로 작성된 native 백엔드와 병렬화된 훈련 파이프라인을 이용하므로, CC-100 수 GB 규모의
+데이터에서도 수십 분 이내에 학습이 완료된다. HF 구현은 모든 본 연구의 실제 비교 벤치마크
+(표~\ref{tab:stats})와 번역 실험의 주 토크나이저로 사용된다.
+(iii) 인코딩 경로의 경우, 자체 구현은 단순한 greedy longest-match 대신 저장된 merge 순서를 반복
+적용하는 ``재-병합''(re-merge) 방식을 사용한다. 이는 훈련 시의 분절과 추론 시의 분절이 정확히
+일치하도록 보장하지만, 최악의 경우 $O(|\text{merges}| \cdot n)$의 시간 복잡도를 갖는다. HF 구현은
+내부적으로 해시 기반의 병합 테이블 조회로 $O(n)$에 가까운 성능을 낸다.
+
+\subsection{Translation Model}
+
+토크나이저가 실제 학습에 미치는 영향을 평가하기 위해, PyTorch 기반으로 표준 Transformer 구조의
+한국어-영어 번역기를 구현하였다. 전체 데이터 흐름은 그림~\ref{fig:arch}에 도식화되어 있으며,
+구체 아키텍처와 하이퍼파라미터는 표~\ref{tab:model}과 같다.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\textwidth,keepaspectratio]{figures/transformer.png}
+\caption{번역 모델 아키텍처. 한국어 소스(예: ``강아지'')는 embedding 후 4개의 Encoding Layer
+(self-attention + feed-forward)를 거쳐 memory 표현을 생성한다. 영어 타겟(예: ``Puppy'')은
+embedding 후 4개의 Decoding Layer(causal-masked self-attention + encoder--decoder cross-attention
++ feed-forward)를 거치며, 각 decoding layer는 encoder memory를 cross-attention으로 참조한다.
+최종 decoder 출력은 unembedding(선형 사영)을 통해 타겟 어휘 공간으로 투영되고, teacher forcing
+하에서 다음 토큰(예: ``Cat?'')과의 cross-entropy loss로 학습된다.}
+\label{fig:arch}
+\end{figure*}
+
+\begin{table}[h]
+\caption{Seq2SeqTransformer 구성.}
+\label{tab:model}
+\small
+\begin{tabular}{ll}
+\toprule
+구성 요소 & 값 \\
+\midrule
+$d_\text{model}$ & 512 \\
+Attention heads & 8 \\
+Encoder layers & 4 \\
+Decoder layers & 4 \\
+Feed-forward dim. & 1024 \\
+Dropout & 0.1 \\
+Max sequence length & 128 \\
+Positional encoding & sinusoidal \\
+Source tokenizer & Jamo-BPE 32k / Full-BPE 32k \\
+Target tokenizer & GPT-2 tokenizer (fixed) \\
+\midrule
+Total parameters & $\approx$ 89M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+모델은 \code{torch.nn.Transformer}를 기반으로 한다. 입력 임베딩은 $\sqrt{d_\text{model}}$로
+스케일링된 뒤 sinusoidal positional encoding과 합산되며, 디코더에서는 상삼각 causal mask로
+미래 토큰의 누출을 방지한다. 소스/타겟 모두 패딩 마스크를 적용하여 패딩 토큰이 attention에
+영향을 주지 않도록 한다. 최종적으로 디코더 출력을 선형 층(\texttt{generator})을 통해 타겟 어휘 공간으로
+사영한 후 teacher forcing 방식으로 학습한다.
+
+\textbf{학습 설정.} 배치 크기 32, 최대 5 epoch, 최적화기는 AdamW($\beta_1{=}0.9$, $\beta_2{=}0.98$,
+$\epsilon{=}10^{-9}$), 기준 학습률 $3 \times 10^{-4}$에 inverse-square-root 스케줄(warmup 1,000 step)을
+적용하였다. cross-entropy loss에 label smoothing 0.1, gradient clipping $\|g\|_2 \le 1.0$,
+CUDA에서는 bfloat16 autocast를 사용한다. 검증 loss가 최저인 시점의 체크포인트를 저장하며,
+보고서의 학습 곡선 비교 결과는 실제 실험 기록 기준 4 epoch까지 진행된 run을 사용하였다.
+
+영어 측 타겟 토크나이저는 GPT-2 사전학습 토크나이저(\code{Tokenizer.from_pretrained("gpt2")})를
+고정으로 사용하여, 실험 변수를 한국어 측 토크나이저로 제한하였다. 이는 영어 측의 토큰화 품질을
+``산업 표준''에 고정시켜, 관찰되는 차이가 한국어 측 토크나이저에서 비롯됨을 분명히 하기 위한
+설계이다.
+
+\textbf{데이터 수집 경로 (Data Loading).} 번역 데이터는 \code{build_pairs} 함수가 각 도메인
+JSON 파일을 \code{json.load()}로 전체 메모리에 읽은 뒤, $\langle$ko, en$\rangle$ 쌍을 파이썬
+리스트에 누적한다(\code{dataset.py} 21, 78행). 한국어/영어 중 길이 2자 미만인 짝은 이 단계에서
+필터링된다. 각 배치는 \code{make_collate_fn}이 생성한 collate 함수에 의해 소스/타겟 시퀀스가
+각각 \code{<pad>}로 right-pad되어 배치 텐서로 변환되고, padding 마스크와 teacher-forcing용
+\code{tgt_in}/\code{tgt_out} (right/left shifted) 텐서가 함께 생성된다. \code{DataLoader}는
+훈련 시 \code{shuffle=True}와 \code{drop_last=True}로, 검증 시 \code{shuffle=False}로 구성된다.
+
+\textbf{로그 및 체크포인트.} 매 학습 run은 \code{runs/{kr_tokenizer}/{timestamp}/} 경로에
+\code{log.jsonl}과 \code{best.pt}를 생성한다. 100 스텝마다 step-level loss, learning rate,
+유효 토큰 수가 JSONL 형식으로 기록되며, 매 epoch 종료 시 train/valid loss와 5개 검증 샘플에 대한
+greedy 번역 결과도 함께 기록된다. 이 로그는 \code{src/scripts/plot_loss.py}를 통해 매끄러운 EMA
+스무딩 곡선으로 시각화된다.
+
+\subsection{Tokenizer Benchmarking}
+
+토큰화 효율을 측정하기 위해 \code{src/scripts/tokenizer_stats.py}를 통해 CC-100 한국어
+\code{chunk_05}의 최대 5,000개 문장에 대해 각 토크나이저로 인코딩한 뒤 토큰 개수 분포를
+집계하였다. 측정 지표는 샘플 수, 총 토큰 수, 평균(mean), 중앙값(median), 표준편차(stdev),
+분산(var), 최솟값(min), 95-분위수(p95), 최댓값(max)이다. 비교 대상으로는 자체 Python 구현
+Jamo/Full 32k, HF 구현 Jamo/Full 32k 및 16k, 그리고 OpenAI tiktoken \texttt{o200k\_base}(GPT-4o 인코딩)를
+포함하였다.
+
+\subsection{Demo}
+
+연구 결과물의 접근성을 높이기 위해 Streamlit 기반의 데모를 제작하였다
+(\code{src/main.py}). 사용자는 (i) Dataset 규모 (\code{small} / \code{large} / \code{large_16k}),
+(ii) Mode (\code{jamo} / \code{full})의 두 축을 선택한 뒤 한국어 문장을 입력하면
+분절 결과를 실시간으로 확인할 수 있고, \code{large} 설정에서는 해당 토크나이저로 학습된
+번역 체크포인트를 로드하여 greedy decoding으로 영어 번역까지 함께 출력한다.
+
+데모 앱은 \code{@st.cache_resource}를 사용해 토크나이저와 모델 체크포인트를 세션에 한 번만 로드하므로
+사용자 상호작용의 지연을 최소화하였다.
+
+\subsection{Implementation Details}
+
+전체 프로젝트는 Python 3.12, PyTorch ($\ge$2.x), CUDA 12.8 환경에서 수행되었다.
+주요 의존성은 \code{tokenizers} $\ge$0.22, \code{kss} $\ge$6.0, \code{datasets} $\ge$4.8,
+\code{tiktoken} $\ge$0.12, \code{streamlit} $\ge$1.56이다. 모든 실험은 단일 CUDA GPU에서
+수행되었으며, bfloat16 autocast를 통해 메모리와 처리량을 최적화하였다.
+
+파일 구성은 다음과 같다:
+\begin{itemize}
+    \item \code{src/tokenizer/jamo_bpe.py}, \code{src/tokenizer/hf_jamo_bpe.py} — 토크나이저 구현.
+    \item \code{src/translation/model.py} — \code{Seq2SeqTransformer} 정의 및 greedy decode.
+    \item \code{src/translation/train.py} — 학습 루프, 로그, 체크포인트 저장.
+    \item \code{src/translation/dataset.py} — JSON 기반 병렬 데이터 로딩과 collate.
+    \item \code{src/scripts/train_hf_tokenizer.py} — HF 토크나이저 대규모 학습 스크립트.
+    \item \code{src/scripts/tokenizer_stats.py} — 토크나이저 벤치마크 스크립트.
+    \item \code{src/scripts/plot_loss.py} — 학습 loss 곡선 시각화.
+    \item \code{src/main.py} — Streamlit 데모 엔트리포인트.
+\end{itemize}
+
+\section{Experimental Setup}
+\label{sec:setup}
+
+토크나이저 비교 실험은 표~\ref{tab:setup}과 같이 6개의 한국어 토크나이저 변형에 대해 수행하였다.
+번역 학습 실험은 이 중 \texttt{hf\_jamo}와 \texttt{hf\_full}(32k, CC-100 2 청크 학습) 두 조건에서만
+수행하였다.
+
+\begin{table}[h]
+\caption{실험에 사용된 토크나이저 변형.}
+\label{tab:setup}
+\small
+\begin{tabular}{llll}
+\toprule
+Key & 구현 & Mode & Vocab \\
+\midrule
+\texttt{local/jamo}      & Python BPE & Jamo & 32k (실제 8{,}904) \\
+\texttt{local/full}      & Python BPE & Char & 32k (실제 8{,}904) \\
+\texttt{hf/jamo}         & HF BPE     & Jamo & 32k \\
+\texttt{hf/full}         & HF BPE     & Char & 32k \\
+\texttt{hf/jamo\_16k}    & HF BPE     & Jamo & 16k \\
+\texttt{hf/full\_16k}    & HF BPE     & Char & 16k \\
+\texttt{tiktoken}        & OpenAI     & Byte-BPE & \texttt{o200k\_base} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Tokenization Efficiency}
+
+CC-100 한국어 \texttt{chunk\_05}에서 추출한 5,000개 문장에 대한 토큰 길이 분포 통계를
+표~\ref{tab:stats}에 정리하였다.
+
+\begin{table}[h]
+\caption{토크나이저별 토큰 수 통계 (CC-100 ko / \texttt{chunk\_05}, 5{,}000 samples).}
+\label{tab:stats}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Tokenizer & Total & Mean & Min & p95 \\
+\midrule
+\texttt{local/jamo} 32k    & 197{,}285 & 39.46 & 4  & 125 \\
+\texttt{local/full} 32k    & 292{,}736 & 58.55 & 10 & 197 \\
+\texttt{hf/jamo} 32k       & 124{,}532 & 24.91 & 2  & 83  \\
+\texttt{hf/full} 32k       & 126{,}119 & 25.22 & 2  & 83  \\
+\texttt{hf/jamo\_16k}      & 137{,}542 & 27.51 & 3  & 91  \\
+\texttt{hf/full\_16k}      & 145{,}554 & 29.11 & 3  & 95  \\
+\texttt{tiktoken/o200k}    & 182{,}342 & 36.47 & 2  & 120 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+통계 결과에서 두 가지 경향이 명확하게 관찰된다.
+\begin{itemize}
+    \item \textbf{소설 코퍼스로 학습한 토크나이저에서 Jamo 우위가 극대화된다.} 공모전 기반
+    소설 텍스트(수 MB 규모)로 학습된 자체 Python 구현 기준, \texttt{local/jamo}의 평균 토큰 수는
+    39.46으로 \texttt{local/full}의 58.55 대비 약 32.6\% 적다. 평가는 CC-100 \code{chunk_05}에서
+    이루어지므로, 학습-평가 도메인 불일치 상황에서 문자 기반 토크나이저는 미관찰 음절을 병합할
+    기회가 부족한 반면, Jamo 기반은 초성/중성/종성 수준의 풍부한 공유 통계로 안정적인 분절을
+    유지하기 때문으로 해석된다.
+    \item \textbf{Vocab 크기가 작을수록 Jamo의 상대적 이점이 커진다.} HF 구현 기준, vocab 32k에서는
+    Jamo(24.91)와 Full(25.22)의 평균 토큰 수 차이가 약 1.3\%에 불과하지만,
+    16k로 축소하면 Jamo(27.51)는 Full(29.11) 대비 약 5.5\% 적다. vocab 용량이 제한될 때
+    Jamo 기반이 더 효율적으로 한국어를 표현함을 시사한다.
+    \item \textbf{다국어 토크나이저는 한국어에서 비효율적이다.} tiktoken \texttt{o200k\_base}의 평균 토큰 수는
+    36.47로, 본 연구의 한국어 전용 32k 토크나이저(Jamo, Full 모두) 대비 약 45\% 이상 더 많은 토큰을
+    사용하였다. 이는 다국어 모델이 한국어에 제한된 어휘 예산만을 할당하는 구조적 결과이다.
+\end{itemize}
+
+흥미로운 점은 \emph{최소 토큰 수(min)} 지표에서 HF 32k 토크나이저와 tiktoken이 모두 2로 동일하다는
+것이다. 즉 매우 짧은 입력에서는 tiktoken의 긴 다국어 서브워드가 유리하게 작용하는 경우가
+존재한다. 반면 본 연구의 16k 토크나이저는 최솟값이 3으로, 충분히 짧은 입력을 단일 또는 2-토큰으로
+커버하지 못한다는 trade-off를 보였다. 이 격차는 vocab 예산이 줄어들수록 ``가장 짧은 표현'' 영역에
+할당되는 고빈도 서브워드의 수가 감소하기 때문으로 해석된다.
+
+\subsection{Distribution Analysis}
+
+평균 이외의 분포 특성 또한 토크나이저 선택에 중요한 함의를 제공한다.
+표~\ref{tab:stats_full}은 표준편차와 95-분위수를 포함한 확장된 통계이다.
+
+\begin{table}[h]
+\caption{토크나이저별 토큰 수의 분포 특성 (CC-100 ko / \texttt{chunk\_05}).}
+\label{tab:stats_full}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Tokenizer & Median & Stdev & p95 & Max \\
+\midrule
+\texttt{local/jamo} 32k    & 24 & 45.31 & 125 & 627 \\
+\texttt{local/full} 32k    & 32 & 73.11 & 197 & 1293 \\
+\texttt{hf/jamo} 32k       & 15 & 30.04 & 83  & 523 \\
+\texttt{hf/full} 32k       & 15 & 30.44 & 83  & 526 \\
+\texttt{hf/jamo\_16k}      & 16 & 33.21 & 91  & 570 \\
+\texttt{hf/full\_16k}      & 17 & 35.13 & 95  & 609 \\
+\texttt{tiktoken/o200k}    & 21 & 44.67 & 120 & 781 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+주목할 부분은 다음과 같다.
+\begin{itemize}
+    \item \textbf{꼬리(tail) 특성.} \texttt{local/full}의 최댓값은 1,293 토큰으로, 같은 데이터를
+    \texttt{hf/full} 32k는 최대 526 토큰으로 처리한다. 이는 작은 학습 코퍼스에서 훈련된 문자 기반
+    토크나이저가 긴 문장 처리 시 극단적으로 비효율적일 수 있음을 시사하며, 실제 서비스 환경에서는
+    context window 초과 위험과 직결된다.
+    \item \textbf{표준편차 축소.} HF 32k 체계에서 Jamo(30.04)와 Full(30.44)의 stdev가 거의 동일한
+    반면, 16k로 축소하면 Jamo(33.21)가 Full(35.13) 대비 약 5.5\% 낮은 변동성을 보인다. 평균뿐 아니라
+    분산 측면에서도 Jamo 기반이 더 일관된 분절을 제공함을 뜻한다.
+    \item \textbf{중앙값 기반 비교.} 평균은 긴 꼬리에 민감하므로, 중앙값(median) 기준으로도
+    비교하였다. \texttt{hf/jamo\_16k}(16) vs \texttt{hf/full\_16k}(17)에서 Jamo 기반의 우위가
+    꼬리 효과가 아닌 전반적 분포의 중앙 이동에서 비롯됨을 확인할 수 있다.
+\end{itemize}
+
+\subsection{Training Loss}
+
+동일 구조(표~\ref{tab:model})의 Transformer 번역기를 \texttt{hf\_full} 32k와 \texttt{hf\_jamo} 32k
+토크나이저로 각각 학습시킨 결과, 학습 단계별 loss 곡선은 그림~\ref{fig:loss}와 같이 서로
+매우 유사하게 나타났다. 지수 이동평균($\alpha=0.9$)으로 스무딩한 곡선에서도 두 run의 차이는 일관되게
+작았으며, 최종 validation loss의 상대 차이는 약 1\% 수준으로 본 실험 규모에서는 오차 범위 내로
+해석할 수 있는 차이이다.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\columnwidth,keepaspectratio]{src/scripts/plots/combined_smooth.png}
+\caption{\texttt{hf\_full} vs \texttt{hf\_jamo} 학습 loss 비교 (EMA 0.9 스무딩).}
+\label{fig:loss}
+\end{figure}
+
+이는 토큰화 \emph{효율}의 차이가 loss 관점에서는 거의 드러나지 않음을 뜻한다. 두 토크나이저가
+비슷한 수준의 시퀀스 길이를 생성하고 있고(표~\ref{tab:stats} 참조), Transformer가 결국
+어떤 분절 방식이든 동등하게 표현력을 학습해 내기 때문인 것으로 추정된다.
+
+추가로, loss 수치는 토큰 단위로 계산되므로 단순한 loss 비교는 토크나이저 간 ``동등'' 비교가 아님에
+주의해야 한다. Jamo 기반은 문장당 토큰 수가 약간 적어 한 토큰당 정보량이 더 크고, 따라서 절대 loss가
+동일하더라도 실제 ``문장당 perplexity'' 혹은 번역 품질 관점에서는 차이가 존재할 수 있다. 본 실험에서는
+시퀀스 길이 차이가 작아 이러한 보정의 영향이 제한적이지만, 더 큰 vocab 차이가 있는 조건에서는
+bits-per-byte(bpb) 혹은 character-level loss 등 토크나이저 독립적 지표로의 환산이 필요할 것이다.
+
+\subsection{Qualitative Analysis: Meaning-aligned Segmentation}
+
+정량 결과 외에, 의미 경계와 토큰 경계의 일치 측면에서 흥미로운 정성적 결과를 확인하였다.
+단어 ``노랫말''(``lyrics'')에 대해, 문자 기반 토크나이저는 이를 세 개의 토큰으로 분절하였으나
+앞의 두 토큰은 그 자체로 독립적인 의미를 갖지 않았고 오직 마지막 토큰만이 ``말''(words)에
+해당하는 의미를 가졌다.
+
+반면 Jamo 기반 토크나이저는 동일하게 세 개의 토큰으로 분절하였지만, 각 토큰이 각각
+``노래''(music/song), 사잇소리 ``ㅅ''(두 단어를 연결하는 interfix), 그리고 ``말''(words)에
+대응되도록 분리되었다. 즉, 형태소 경계와 일치하는 의미 중심의 분절이 이루어진 것이다.
+이러한 정렬은 모델이 의미 단위에 대해 더 일관된 표현(representation)을 학습할 수 있는 조건을
+제공한다고 볼 수 있다.
+
+이 외에도 활용 어미 경계의 예시를 살펴보자. 동사 ``먹다''의 존댓말 활용형 ``먹었어요''는
+``먹(어간) + 었(과거 선어말 어미) + 어요(종결 어미)''로 분석되는데, 여기서 ``었''의 종성 ``ㅆ''는
+본래 어간의 일부가 아니라 과거 시제 형태소의 일부이다. 문자 기반 토크나이저는 ``었''을 하나의
+원자로 고정하므로 이러한 형태소 경계를 드러낼 기회가 원리적으로 차단되지만, Jamo 기반은
+ㅆ를 별도의 자모로 관찰하므로 ``ㅆ + 어요'' 혹은 ``ㅆ어요''와 같은 형태소 기반 분절을 자연스럽게
+학습할 여지를 갖는다. 이는 한국어와 같이 교착어적 성격을 지닌 언어에서 특히 유효하다.
+
+\subsection{Real-world Examples}
+
+실제 한국어 가사 전문(全文)에 대한 적용 사례로, BTS의 ``봄날''(Spring Day)과 IU의
+``밤편지'' 두 곡을 각각 네 토크나이저(Small/Large $\times$ Jamo/Character)에 투입하여
+총 토큰 수를 측정하였다. 결과는 표~\ref{tab:lyrics}와 같다.
+
+\begin{table}[h]
+\caption{실 가사 전문(全文) 토큰화 결과. \textbf{Small}은 소설 코퍼스(공모전 기반, 수 MB 규모)로
+학습한 자체 Python BPE(\code{local/*}, 수렴 vocab $\approx$ 8{,}904), \textbf{Large}는 CC-100
+한국어 2 청크로 학습한 HF BPE 32k(\code{hf/*})를 가리킨다.}
+\label{tab:lyrics}
+\small
+\begin{tabular}{llrr}
+\toprule
+곡 & 데이터 & Jamo Based & Character Based \\
+\midrule
+BTS -- 봄날       & Small & 530 & 953 \\
+                  & Large & 436 & 443 \\
+\midrule
+IU -- 밤편지      & Small & 165 & 352 \\
+                  & Large & 145 & 148 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+두 곡 모두에서 CC-100 벤치마크(표~\ref{tab:stats})의 패턴이 그대로 재현된다.
+\begin{itemize}
+    \item \textbf{Small 조건}(소설 코퍼스 학습 Python BPE)에서 격차가 크다. 봄날에서 Jamo
+    530 vs Char 953(약 44.4\% 절감), 밤편지에서 Jamo 165 vs Char 352(약 53.1\% 절감)으로,
+    Jamo 기반이 훨씬 짧은 시퀀스를 생성함이 일관되게 관찰된다. 이는 도메인 한정 소설 코퍼스가
+    일반 한국어(가사)에서 등장하는 음절을 충분히 포괄하지 못해 문자 기반 쪽이 음절 단위 병합을
+    학습할 기회가 적었던 결과로 해석된다.
+    \item \textbf{Large 조건}(CC-100 2 청크 학습 HF BPE 32k)에서는 격차가 크게 축소된다.
+    봄날에서 436 vs 443(약 1.6\% 차이), 밤편지에서 145 vs 148(약 2.0\% 차이)으로 좁혀진다.
+    웹 크롤링 기반 CC-100은 가사와 어휘/표현의 겹침이 크고, 수십만 줄 규모로 모든 흔한 Hangul
+    음절을 충분히 관찰하므로 문자 기반에도 풍부한 병합 기회가 주어지기 때문이다.
+    \item \textbf{곡 간 일관성}. 두 곡 모두 Jamo 기반이 Character 기반보다 짧거나 동등한
+    토큰 시퀀스를 생성하며, 열세인 사례는 관찰되지 않았다.
+\end{itemize}
+
+밤편지의 Small 조건 절감률(53.1\%)이 봄날(44.4\%)보다 크게 나타나는 것은 가사 내 반복
+후렴구 비중 및 고유 음절 다양성 차이에 기인한 것으로 보이며, 곡 단위 정성적 관찰에 해당한다.
+두 사례 모두 \S\ref{sec:results}의 CC-100 평균 토큰 수 경향(``Small에서 Jamo 우위 극대화, Large에서 근사'')과
+정합한다.
+
+\section{Discussion}
+\label{sec:discussion}
+
+실험 결과는 다음과 같이 종합할 수 있다.
+\begin{itemize}
+    \item \textbf{토큰화 효율성 (수치적).} Jamo 기반 토크나이저는 동일하거나 더 작은 vocab 크기에서도
+    평균적으로 더 적은 토큰 수로 한국어 문장을 표현할 수 있었다. 이 이점은 코퍼스 규모가 작거나
+    vocab 예산이 제한될수록 확대된다.
+    \item \textbf{의미 일치성 (구조적).} 사잇소리와 같이 음절 내부에 형태소 경계가 존재하는 한국어 고유의
+    언어 현상이 분절 경계에 자연스럽게 반영되는 사례가 확인되었다. 이는 문자 기반 BPE에서는
+    원리적으로 불가능한 분절이다.
+    \item \textbf{학습 성능 (다운스트림).} 본 연구의 실험 규모(약 89M 파라미터 Transformer;
+    \code{src_vocab=32,770}, \code{tgt_vocab=50,260}, \code{d_model=512}, 4+4 layer이며
+    embedding과 output projection이 전체 파라미터의 약 75\%를 차지,
+    2 청크 분량 학습 데이터, 최대 5 epoch)에서는 두 토크나이저 간 학습 곡선의 차이가 미미하였다.
+    따라서 Jamo 기반 분절의 구조적 이점이 실제 번역 품질(BLEU, chrF, COMET 등)에 유의미하게
+    반영되는지는 본 규모에서는 단정할 수 없으며, 향후 더 큰 모델과 더 긴 학습 스케줄에서의
+    검증이 필요하다.
+    \item \textbf{Trade-off.} Jamo 분해는 시퀀스를 \emph{음절 단위로 보았을 때} 길게 만든다
+    (1 음절 = 2\textendash3 Jamo). 병합을 통해 이 길이를 회복해야 하므로, 단순한 ``jamo = 언제나 더 짧은
+    시퀀스''라는 결론은 성립하지 않는다. 실제로 HF 32k에서 Jamo와 Full의 평균 토큰 수는 거의
+    동일하며, 우위는 vocab/데이터 예산이 제한될 때 주로 드러난다.
+    \item \textbf{실무적 함의.} 다국어 LLM 서비스에서 한국어 fertility가 과도하게 높은 문제를 완화하기
+    위한 한 가지 실용적 접근은, 다국어 공통 vocab에 Jamo 기반 merge를 포함하는 것이다.
+    본 연구의 결과는 Jamo 기반이 문자 기반보다 평균 토큰 수에서 결코 열세가 아니라는 점을 보이므로
+    (32k에서 동등, 16k에서 우위), 다국어 vocab에 Hangul 음절을 전부 포함시키는 대신 자모를 기저로 두는
+    선택이 비용-효율 측면에서 유리할 수 있다.
+    \item \textbf{학습 안정성.} 학습 초기 단계(warmup 구간)에서 두 run 모두 loss 곡선이 유사한 궤적을
+    그렸고, 학습 종료 시점의 validation loss도 1\% 이내에서 수렴하였다. 이는 Jamo 분해가 모델
+    수렴성(convergence stability)에 부정적 영향을 주지 않음을 의미하며, 기존 파이프라인을
+    교체하는 비용이 작다는 실무적 장점을 시사한다.
+\end{itemize}
+
+\section{Limitations}
+\label{sec:limitations}
+
+본 연구는 몇 가지 한계를 지닌다.
+\begin{itemize}
+    \item \textbf{실험 규모.} 번역 모델은 약 89M 파라미터 규모의 Transformer이며
+    (embedding/output projection이 대부분을 차지), 학습 데이터는
+    CC-100 2 청크 + AI-Hub 일부 도메인에 제한되었다. 이 규모에서 관찰된 loss 동등성은 더 큰 모델이나
+    긴 학습에서 다른 양상을 보일 수 있다.
+    \item \textbf{단일 태스크.} 한영 번역이라는 단일 downstream 태스크에서만 평가하였으며,
+    언어 모델링, 요약, 분류 등 다른 태스크로의 일반화는 검증되지 않았다.
+    \item \textbf{평가 지표.} BLEU, chrF++, COMET 등 다운스트림 품질 지표는 본 보고서에 포함되지
+    않았으며, 학습 loss 수렴성만을 비교하였다. 따라서 ``토큰화 효율 개선이 번역 품질로 이어지는가''라는
+    질문에는 직접적인 답을 제시하지 못한다.
+    \item \textbf{한국어 표기 범위.} Jamo 분해는 현대 Hangul 음절에 대해 완전하지만, 고어 Hangul
+    (\texttt{U+1100--U+11FF}의 전체 범위 활용)이나 중국어/일본어가 섞인 혼용 표기 등 경계
+    케이스에서는 Kss의 동작에 의존하며, 일부 특수 케이스는 본 연구에서 검증되지 않았다.
+    \item \textbf{영어 측 토크나이저 고정.} 타겟 측은 GPT-2 토크나이저로 고정되어 있어, 타겟 토큰화가
+    번역 품질에 미치는 영향은 본 연구 범위 밖이다.
+    \item \textbf{Greedy decoding.} 번역 예시는 greedy decoding으로 생성되었으며, beam search나
+    샘플링 기반 디코딩에서의 차이는 측정하지 않았다.
+\end{itemize}
+
+\section{Future Work}
+\label{sec:future}
+
+향후 다음의 방향으로 연구를 확장할 수 있다.
+\begin{itemize}
+    \item \textbf{더 큰 규모의 검증.} 본 연구의 89M 규모 Transformer 대신 수백 M 이상 규모의 모델과
+    전체 CC-100 한국어 코퍼스(23 청크) 및 AI-Hub 전 도메인을 활용한 번역 실험을 통해,
+    Jamo 기반 토크나이저의 이점이 BLEU, chrF++~\cite{popovic2017chrf}, COMET~\cite{rei2020comet} 등
+    다운스트림 지표에 반영되는지 검증한다.
+    \item \textbf{다양한 태스크로 확장.} 번역뿐 아니라 요약, 질의응답, 언어 모델링, 형태소 분석 등
+    다양한 태스크에서 평가한다. 특히 형태소 분석과 같이 경계 민감 태스크에서는 Jamo 기반 분절의
+    이점이 상대적으로 더 크게 드러날 것으로 기대된다.
+    \item \textbf{Cross-lingual 일반화.} Jamo 기반 접근을 일본어의 가나/한자 혼용이나 중국어의 부수(radical)
+    수준 분해, 베트남어의 결합형 모음/성조 기호 등 다른 동아시아 언어에 유사하게 적용할 수 있는지
+    탐구한다.
+    \item \textbf{하이브리드 토크나이저.} 형태소 분석기와의 결합, 또는 Jamo-level BPE와
+    character-level BPE를 혼합하여, 빈출 음절은 음절 단위로 유지하되 드물고 복합적인 음절만 Jamo 단위로
+    분해하는 하이브리드 토크나이저를 설계한다. 이는 평균 시퀀스 길이를 더 줄이면서도 의미 경계 표현력을
+    보존할 수 있을 것으로 기대된다.
+    \item \textbf{토큰 분포 및 vocab 진단.} BPE merge 순서, Jamo/음절 단위 unigram 확률,
+    per-morpheme coverage 등 vocab 수준 진단 지표를 추가하여, 왜 특정 조건에서 Jamo 기반이
+    더 유리한지에 대한 정량적 설명을 제공한다.
+    \item \textbf{다양한 디코딩 전략.} 본 연구는 greedy decoding만을 사용하였으나, beam search,
+    top-$k$/top-$p$ sampling, length-penalty 등 다양한 디코딩 전략 하에서 Jamo 기반 토크나이저가
+    생성하는 번역의 품질과 유창성(fluency)을 비교한다.
+    \item \textbf{도메인 전이 및 robustness.} 학습 도메인(뉴스/웹)과 다른 도메인(구어체, SNS, 의료 등)에
+    대한 토큰화 효율을 측정하여, Jamo 기반 접근이 도메인 외 일반화(out-of-distribution generalization)에
+    어떤 영향을 주는지 조사한다.
+    \item \textbf{Jamo-level sharing.} 다국어 토크나이저에 Jamo를 기저로 포함시키고, 중국어 부수,
+    일본어 가나 등과 어휘를 공유하도록 설계함으로써 여러 동아시아 언어에 걸쳐 vocab을 공유하는 접근을
+    탐구한다.
+    \item \textbf{Attention/표현 공간 분석.} 동일한 Transformer가 Jamo 기반 vs 문자 기반 입력을 받았을 때
+    attention pattern, 임베딩 유사도, 내부 표현의 클러스터링이 어떻게 달라지는지 정성/정량적으로
+    비교한다. 이는 ``의미 일치성''이라는 주장을 내부 표현 수준에서 검증하는 데 기여할 수 있다.
+\end{itemize}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+본 연구에서는 Hangul의 구조적 특성을 반영하여, 문자 단위가 아닌 Jamo 단위에서 BPE를 적용하는
+한국어 토크나이저를 제안하고 구현하였다. 자체 Python 구현(\texttt{JamoBPE})과
+Hugging Face 기반 구현(\texttt{HFJamoBPE}) 두 버전을 통해 vocab 크기 32k 및 16k의 다양한 설정에서
+실험을 수행하였으며, 동일 구조의 Transformer 기반 한영 번역기를 활용해 실제 학습 곡선을
+비교하였다. 그 결과, Jamo 기반 토크나이저는 (i) 동일 vocab에서 평균적으로 더 적은 토큰 수로
+한국어를 표현하며, (ii) 작은 vocab 또는 작은 코퍼스에서 그 이점이 확대되고,
+(iii) 음절 내부에 걸친 형태소 경계를 표현할 수 있다는 구조적 장점을 제공함을 확인하였다.
+다만 본 규모의 번역 실험에서는 학습 loss 측면의 차이는 미미하였으며, 이 구조적 이점이
+다운스트림 성능으로 이어지는지는 더 큰 규모에서의 추가 검증이 필요하다. 본 접근은 앞으로 보다 큰
+모델과 다양한 태스크에서 검증될 때 그 유용성이 더욱 분명해질 것으로 기대된다.
+
+%% 참고문헌
+\begin{thebibliography}{9}
+
+\bibitem{sennrich2016bpe}
+R.~Sennrich, B.~Haddow, and A.~Birch,
+``Neural machine translation of rare words with subword units,''
+in \emph{Proc. of ACL}, 2016.
+
+\bibitem{vaswani2017attention}
+A.~Vaswani, N.~Shazeer, N.~Parmar, J.~Uszkoreit, L.~Jones, A.~N.~Gomez, Ł.~Kaiser, and I.~Polosukhin,
+``Attention is all you need,''
+in \emph{Proc. of NeurIPS}, 2017.
+
+\bibitem{huggingface_tokenizers}
+Hugging Face,
+``Tokenizers: Fast state-of-the-art tokenizers optimized for research and production,''
+\url{https://github.com/huggingface/tokenizers}.
+
+\bibitem{kss}
+H.~Park,
+``Kss: A Toolkit for Korean sentence segmentation,''
+\url{https://github.com/hyunwoongko/kss}.
+
+\bibitem{tiktoken}
+OpenAI,
+``tiktoken: A fast BPE tokeniser for use with OpenAI's models,''
+\url{https://github.com/openai/tiktoken}.
+
+\bibitem{wu2016google}
+Y.~Wu \emph{et al.},
+``Google's neural machine translation system: Bridging the gap between human and machine translation,''
+arXiv:1609.08144, 2016.
+
+\bibitem{kudo2018sentencepiece}
+T.~Kudo and J.~Richardson,
+``SentencePiece: A simple and language independent subword tokenizer and detokenizer for neural text processing,''
+in \emph{Proc. of EMNLP (System Demonstrations)}, 2018.
+
+\bibitem{conneau2020cc100}
+A.~Conneau \emph{et al.},
+``Unsupervised cross-lingual representation learning at scale,''
+in \emph{Proc. of ACL}, 2020.
+
+\bibitem{popovic2017chrf}
+M.~Popović,
+``chrF++: words helping character n-grams,''
+in \emph{Proc. of WMT}, 2017.
+
+\bibitem{rei2020comet}
+R.~Rei, C.~Stewart, A.~C.~Farinha, and A.~Lavie,
+``COMET: A neural framework for MT evaluation,''
+in \emph{Proc. of EMNLP}, 2020.
+
+\bibitem{kudo2018sp}
+T.~Kudo,
+``Subword regularization: Improving neural network translation models with multiple subword candidates,''
+in \emph{Proc. of ACL}, 2018.
+
+\bibitem{provilkov2020bpedropout}
+I.~Provilkov, D.~Emelianenko, and E.~Voita,
+``BPE-Dropout: Simple and effective subword regularization,''
+in \emph{Proc. of ACL}, 2020.
+
+\bibitem{radford2019gpt2}
+A.~Radford, J.~Wu, R.~Child, D.~Luan, D.~Amodei, and I.~Sutskever,
+``Language models are unsupervised multitask learners,''
+OpenAI Technical Report, 2019.
+
+\bibitem{mecabko}
+T.~Kudo \emph{et al.},
+``MeCab: Yet Another Part-of-Speech and Morphological Analyzer,''
+\url{https://taku910.github.io/mecab/}; MeCab-ko fork for Korean.
+
+\bibitem{krbert}
+S.~Lee \emph{et al.},
+``KR-BERT: A small-scale Korean-specific language model,''
+arXiv:2008.03979, 2020.
+
+\bibitem{kocharelectra}
+J.~Park,
+``KoCharELECTRA: Character-level Korean ELECTRA,''
+\url{https://github.com/monologg/KoCharELECTRA}.
+
+\bibitem{park2020jamo}
+S.~Park \emph{et al.},
+``Sub-character level embeddings for Korean,''
+in \emph{Proc. of LREC / 관련 학술대회}, 2020.
+
+\bibitem{rust2021multilingualtok}
+P.~Rust, J.~Pfeiffer, I.~Vulić, S.~Ruder, and I.~Gurevych,
+``How good is your tokenizer? On the monolingual performance of multilingual language models,''
+in \emph{Proc. of ACL}, 2021.
+
+\end{thebibliography}
+
+\end{document}

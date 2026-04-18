@@ -4,19 +4,23 @@ from pathlib import Path
 from tqdm import tqdm
 
 from ..tokenizer.hf_jamo_bpe import HFJamoBPE
-from ..tokenizer.config import DEFAULT_VOCAB_SIZE, DEFAULT_MIN_FREQUENCY
+from ..tokenizer.config import DEFAULT_MIN_FREQUENCY
 
 
 # How to run: python -m src.scripts.train_hf_tokenizer
 
 
-JAMO_BREAK = True
+JAMO_BREAK = False
 
-SUFFIX = "hf_jamo"
+SUFFIX = "hf_full"
 DATASET = "CocoRoF/cc-100-korean-processing"
-USE_PARTS: list[int] | None = None  # e.g. [0, 1, 2]; None = all
+USE_PARTS: list[int] | None = [0, 1]  # e.g. [0, 1, 2]; None = all
                   # JAMO_BREAK=True  -> indexes into cc100_hf_jamo.part*.txt (0..9)
                   # JAMO_BREAK=False -> indexes into HF dataset chunks (0..22)
+
+VOCAB_SIZE = 16384
+MIN_FREQUENCY = DEFAULT_MIN_FREQUENCY
+OUTPUT_NAME = "hf_full_16k"
 
 
 def file_line_iterator(paths):
@@ -39,7 +43,7 @@ def hf_dataset_iterator(dataset):
 
 def main():
     project_dir = Path(__file__).parents[2]
-    output_dir = project_dir / "dicts" / SUFFIX
+    output_dir = project_dir / "dicts" / OUTPUT_NAME
 
     if JAMO_BREAK:
         corpus_dir = project_dir / "datas" / "preprocessed"
@@ -64,12 +68,12 @@ def main():
         datasets = [load_dataset(DATASET, c, split="train", cache_dir=str(cache_dir)) for c in chunks]
         iterator = hf_dataset_iterator(chain.from_iterable(datasets))
 
-    print(f"Training tokenizer (jamo_break={JAMO_BREAK}, vocab_size={DEFAULT_VOCAB_SIZE}, min_frequency={DEFAULT_MIN_FREQUENCY})")
+    print(f"Training tokenizer (jamo_break={JAMO_BREAK}, vocab_size={VOCAB_SIZE}, min_frequency={MIN_FREQUENCY})")
     tokenizer = HFJamoBPE(jamo_break=JAMO_BREAK)
     tokenizer.train_from_iterator(
         iterator,
-        vocab_size=DEFAULT_VOCAB_SIZE,
-        min_frequency=DEFAULT_MIN_FREQUENCY,
+        vocab_size=VOCAB_SIZE,
+        min_frequency=MIN_FREQUENCY,
     )
 
     tokenizer.save(output_dir)

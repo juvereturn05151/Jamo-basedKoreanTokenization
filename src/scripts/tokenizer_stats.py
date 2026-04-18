@@ -21,6 +21,8 @@ BACKEND_DIRS = {
     ("local", "full"): "full",
     ("hf", "jamo"): "hf_jamo",
     ("hf", "full"): "hf_full",
+    ("hf", "jamo_16k"): "hf_jamo_16k",
+    ("hf", "full_16k"): "hf_full_16k",
 }
 
 
@@ -30,6 +32,8 @@ def load_tokenizers(dicts_root):
         ("local", "full"): JamoBPE(jamo_break=False),
         ("hf", "jamo"): HFJamoBPE(jamo_break=True),
         ("hf", "full"): HFJamoBPE(jamo_break=False),
+        ("hf", "jamo_16k"): HFJamoBPE(jamo_break=True),
+        ("hf", "full_16k"): HFJamoBPE(jamo_break=False),
     }
     for key, tok in tokenizers.items():
         tok.load(dicts_root / BACKEND_DIRS[key])

@@ -11,10 +11,12 @@ from translation.model import Seq2SeqTransformer
 
 
 BACKEND_DIRS = {
-    ("local", "jamo"): "jamo",
-    ("local", "full"): "full",
-    ("hf", "jamo"): "hf_jamo",
-    ("hf", "full"): "hf_full",
+    ("small", "jamo"): "jamo",
+    ("small", "full"): "full",
+    ("large", "jamo"): "hf_jamo",
+    ("large", "full"): "hf_full",
+    ("large_16k", "jamo"): "hf_jamo_16k",
+    ("large_16k", "full"): "hf_full_16k",
 }
 
 
@@ -66,15 +68,19 @@ def load_tokenizers():
     output_dir = project_dir / "dicts"
 
     tokenizers = {
-        ("local", "jamo"): JamoBPE(jamo_break=True),
-        ("local", "full"): JamoBPE(jamo_break=False),
-        ("hf", "jamo"): HFJamoBPE(jamo_break=True),
-        ("hf", "full"): HFJamoBPE(jamo_break=False),
+        ("small", "jamo"): JamoBPE(jamo_break=True),
+        ("small", "full"): JamoBPE(jamo_break=False),
+        ("large", "jamo"): HFJamoBPE(jamo_break=True),
+        ("large", "full"): HFJamoBPE(jamo_break=False),
+        ("large_16k", "jamo"): HFJamoBPE(jamo_break=True),
+        ("large_16k", "full"): HFJamoBPE(jamo_break=False),
     }
-    ensure_tokenizer(tokenizers[("local", "jamo")], output_dir / "jamo", input_dir)
-    ensure_tokenizer(tokenizers[("local", "full")], output_dir / "full", input_dir)
-    ensure_hf_tokenizer(tokenizers[("hf", "jamo")], output_dir / "hf_jamo", input_dir)
-    ensure_hf_tokenizer(tokenizers[("hf", "full")], output_dir / "hf_full", input_dir)
+    ensure_tokenizer(tokenizers[("small", "jamo")], output_dir / "jamo", input_dir)
+    ensure_tokenizer(tokenizers[("small", "full")], output_dir / "full", input_dir)
+    ensure_hf_tokenizer(tokenizers[("large", "jamo")], output_dir / "hf_jamo", input_dir)
+    ensure_hf_tokenizer(tokenizers[("large", "full")], output_dir / "hf_full", input_dir)
+    ensure_hf_tokenizer(tokenizers[("large_16k", "jamo")], output_dir / "hf_jamo_16k", input_dir)
+    ensure_hf_tokenizer(tokenizers[("large_16k", "full")], output_dir / "hf_full_16k", input_dir)
     return tokenizers, input_dir, output_dir
 
 
@@ -168,9 +174,9 @@ def main():
     with col1:
         dataset = st.radio(
             "Dataset",
-            ["local", "hf"],
+            ["small", "large", "large_16k"],
             horizontal=True,
-            format_func=lambda v: {"local": "Small", "hf": "Large"}[v],
+            format_func=lambda v: {"small": "Small", "large": "Large", "large_16k": "Large (16k)"}[v],
         )
     with col2:
         mode = st.radio(
@@ -202,7 +208,7 @@ def main():
             except Exception as e:
                 st.error(f"Tokenization failed: {e}")
 
-            if dataset == "hf":
+            if dataset == "large":
                 kind = "hf_jamo" if mode == "jamo" else "hf_full"
                 st.subheader(f"Translation — {mode.capitalize()}")
                 try:
